@@ -225,6 +225,45 @@ export default function (cmd: ModApi): void {
 		} catch {}
 	};
 
+	const applyModel = (value: string) => {
+		if (!value || value === model) return;
+		model = value;
+		contextLimit = CONTEXT_WINDOWS[model] ?? DEFAULT_CONTEXT_LIMIT;
+		contextPercent =
+			contextTokens > 0 ? Math.min(100, Math.round((contextTokens / contextLimit) * 100)) : undefined;
+	};
+
+	const syncSelection = (): boolean => {
+		let changed = false;
+		const currentModel = cmd.getModel?.();
+		if (typeof currentModel === 'string' && currentModel && currentModel !== model) {
+			applyModel(currentModel);
+			changed = true;
+		}
+		const rawEffort = cmd.getEffort?.();
+		const currentEffort = typeof rawEffort === 'string' ? rawEffort : '';
+		if (currentEffort !== effort) {
+			effort = currentEffort;
+			changed = true;
+		}
+		return changed;
+	};
+
+	let pollTimer: ReturnType<typeof setInterval> | undefined;
+
+	const startWatchingSelection = () => {
+		if (pollTimer) return;
+		pollTimer = setInterval(() => {
+			if (syncSelection()) paint(true);
+		}, 500);
+	};
+
+	const stopWatchingSelection = () => {
+		if (!pollTimer) return;
+		clearInterval(pollTimer);
+		pollTimer = undefined;
+	};
+
 	const line = (): string => {
 		const head = model + (effort ? `/${effort}` : '');
 		const rate = tps === undefined ? '— tok/s' : `${tps.toFixed(1)} tok/s`;
@@ -246,6 +285,23 @@ export default function (cmd: ModApi): void {
 
 	cmd.on('session_start', () => {
 		reset();
+		syncSelection();
+		startWatchingSelection();
+		paint(true);
+	});
+
+	cmd.on('session_shutdown', () => stopWatchingSelection());
+
+	cmd.on('config_setting_changed', event => {
+		const e = event as {setting?: string; value?: unknown};
+		if (e.setting === 'model') {
+			if (typeof e.value === 'string') applyModel(e.value);
+			syncSelection();
+		} else if (e.setting === 'effort') {
+			effort = typeof e.value === 'string' ? e.value : '';
+		} else {
+			return;
+		}
 		paint(true);
 	});
 
@@ -255,6 +311,7 @@ export default function (cmd: ModApi): void {
 		if (e.sessionId !== sessionId) {
 			sessionId = e.sessionId;
 			loadSession(sessionId);
+			syncSelection();
 			paint(true);
 		}
 	});
@@ -309,6 +366,9 @@ export default function (cmd: ModApi): void {
 	});
 
 	cmd.hooks({
-		onSessionEnd: () => cmd.ui.setStatus(null),
+		onSessionEnd: () => {
+			stopWatchingSelection();
+			cmd.ui.setStatus(null);
+		},
 	});
 }
